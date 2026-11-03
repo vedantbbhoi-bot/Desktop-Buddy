@@ -1,0 +1,27 @@
+{
+  "scale": 1.0,
+  "theme": "default",
+  "sprite_dir": "assets/sprites/default",
+  "always_on_top": true,
+  "llm": {
+    "base_url": "http://127.0.0.1:11434",
+    "model": "qwen2.5-coder:3b",
+    "timeout": 30
+  },
+  "tts": {
+    "piper_binary": null,
+    "model_path": "models/piper/en_US-lessac-medium.onnx",
+    "fallback_rate": 175
+  },
+  "stt": {
+    "model_dir": "models/vosk/vosk-model-small-en-us-0.15",
+    "sample_rate": 16000
+  },
+  "window": {
+    "x": 100,
+    "y": 100,
+    "width": 200,
+    "height": 200
+  }
+}
+
