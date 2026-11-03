@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "desktop-buddy"
+version = "0.1.0"
+description = "Fully offline desktop AI pet"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.6",
+    "soundfile>=0.12",
+    "sounddevice>=0.4",
+    "pyttsx3>=2.90",
+    "vosk>=0.3.45",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.4", "pytest>=8", "pytest-qt>=4.4"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
