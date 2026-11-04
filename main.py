@@ -11,8 +11,9 @@ import argparse
 import dataclasses
 import logging
 import pathlib
+import queue
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import threading
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -30,6 +31,33 @@ class Core:
     ollama: object
 
 
+class Worker:
+    """Runs jobs one at a time on a daemon thread.
+
+    Daemon matters: when the user clicks Quit while the model is still answering, the
+    process must exit right away instead of waiting for the slow job to finish.
+    """
+
+    def __init__(self, closing: threading.Event) -> None:
+        self._jobs: queue.Queue = queue.Queue()
+        self._closing = closing
+        threading.Thread(target=self._run, name="buddy-worker", daemon=True).start()
+
+    def submit(self, fn: Callable, *args) -> None:
+        self._jobs.put((fn, args))
+
+    def _run(self) -> None:
+        while True:
+            fn, args = self._jobs.get()
+            if self._closing.is_set():
+                return
+            try:
+                fn(*args)
+            except Exception:
+                if not self._closing.is_set():  # errors during shutdown are expected noise
+                    log.exception("Background job failed")
+
+
 def build_core(
     on_state: Optional[Callable[[str], None]] = None,
     working_dir: Optional[pathlib.Path] = None,
@@ -45,6 +73,18 @@ def build_core(
     ollama = OllamaClient(**dataclasses.asdict(CONFIG.llm))
     tts = TTSEngine(TTSConfig(**dataclasses.asdict(CONFIG.tts)))
     store = ContextStore(db_path or DB_PATH)
+
+    if on_state is not None:  # show the "talking" animation while the voice speaks
+        _orig_speak = tts.speak
+
+        def _speak_with_state(text: str) -> None:
+            on_state("talking")
+            try:
+                _orig_speak(text)
+            finally:
+                on_state("idle")
+
+        tts.speak = _speak_with_state  # speak_async() looks speak up on the instance
 
     model_dir = pathlib.Path(CONFIG.stt.model_dir)
     if not model_dir.is_absolute():
@@ -112,26 +152,34 @@ def run_gui() -> int:
     window = PetWindow(CONFIG)
     # IntentRouter calls this from a worker thread; the signal makes it thread-safe.
     core = build_core(on_state=window.state_changed.emit)
-    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="buddy")  # one job at a time
+    closing = threading.Event()  # set when the app is quitting
+    worker = Worker(closing)     # one job at a time
 
     def reply_to(text: str) -> None:
         try:
             reply = core.router.handle(text)
         except Exception:
+            if closing.is_set():
+                return  # app is quitting; nobody is waiting for this answer
             log.exception("Router failed")
             window.state_changed.emit("confused")
             reply = "Oops, something went wrong. Check the terminal for details."
-        window.bubble_requested.emit(reply)
+        if not closing.is_set():
+            window.bubble_requested.emit(reply)
 
     def on_user_text(text: str) -> None:
-        pool.submit(reply_to, text)
+        worker.submit(reply_to, text)
 
     def listen_job() -> None:
         if not core.stt.is_ready():
             window.bubble_requested.emit("My voice model isn't loaded. Run scripts/download_models.py")
             return
         window.state_changed.emit("listening")
-        text = core.stt.listen(on_partial=lambda p: window.bubble_requested.emit(p))
+        text = core.stt.listen(
+            on_partial=lambda p: None if closing.is_set() else window.bubble_requested.emit(p)
+        )
+        if closing.is_set():
+            return
         if not text:
             window.state_changed.emit("idle")
             window.bubble_requested.emit("I didn't hear anything.")
@@ -139,11 +187,11 @@ def run_gui() -> int:
         reply_to(text)
 
     window.user_text.connect(on_user_text)
-    window.talk_requested.connect(lambda: pool.submit(listen_job))
+    window.talk_requested.connect(lambda: worker.submit(listen_job))
     window.quit_requested.connect(app.quit)
 
     def cleanup() -> None:
-        pool.shutdown(wait=False, cancel_futures=True)
+        closing.set()  # tell background work to stay quiet, then close the database
         core.store.close()
 
     app.aboutToQuit.connect(cleanup)
