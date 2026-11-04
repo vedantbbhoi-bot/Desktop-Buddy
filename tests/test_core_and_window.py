@@ -69,3 +69,55 @@ def test_pet_window_signals():
     assert got == ["hi"]
     assert win._bubble.text() == "hello"
     win.close()
+
+
+def test_pet_window_loads_and_advances_sprite_frames():
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+
+    from src.config import AppConfig
+    from src.pet_window import PetWindow
+
+    QApplication.instance() or QApplication([])
+    win = PetWindow(AppConfig())
+
+    assert len(win._sprite_frames["idle"]) == 10
+    assert len(win._sprite_frames["celebrate"]) == 6
+    first = win._current_sprite_frame(now=win._state_started)
+    next_frame = win._current_sprite_frame(now=win._state_started + 0.13)
+    assert first is not None and next_frame is not None
+    assert first.cacheKey() != next_frame.cacheKey()
+    assert first.pixelColor(0, 0).alpha() == 0
+    win.close()
+
+
+def test_typed_message_dialog_is_top_level_and_emits_text(monkeypatch):
+    pytest.importorskip("PySide6")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QInputDialog
+
+    from src.config import AppConfig
+    from src.pet_window import PetWindow
+
+    app = QApplication.instance() or QApplication([])
+    win = PetWindow(AppConfig())
+    win.show()
+    app.processEvents()
+    submitted = []
+    dialog_args = {}
+
+    def fake_get_text(parent, title, label, *, flags):
+        dialog_args.update(parent=parent, title=title, label=label, flags=flags)
+        dialog_args["pet_hidden"] = not win.isVisible()
+        return "check this task", True
+
+    monkeypatch.setattr(QInputDialog, "getText", fake_get_text)
+    win.user_text.connect(submitted.append)
+    win._ask_text()
+
+    assert dialog_args["parent"] is None
+    assert dialog_args["flags"] & Qt.WindowStaysOnTopHint
+    assert dialog_args["pet_hidden"]
+    assert win.isVisible()
+    assert submitted == ["check this task"]
+    win.close()

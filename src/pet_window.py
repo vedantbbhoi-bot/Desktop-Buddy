@@ -10,10 +10,11 @@ Thread safety: other threads must talk to the window ONLY through its signals:
 from __future__ import annotations
 
 import math
+import pathlib
 import time
 
-from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QBrush, QColor, QFont, QPainter, QPen
+from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QBrush, QColor, QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QInputDialog, QLabel, QMenu, QWidget
 
 # Animation states emitted by IntentRouter (+ "listening", set by main.py)
@@ -24,9 +25,33 @@ STATE_COLORS = {
     "working": "#F5C96B",
     "celebrate": "#FF9EC4",
     "confused": "#F59A8A",
+    "talking": "#FF9EC4",
 }
 # States that fall back to "idle" by themselves
 RESET_AFTER_MS = {"celebrate": 2500, "confused": 2500}
+
+# The supplied 640x1024 sheet is an 8-row grid of 64x128 frames. Four rows
+# contain ten frames and the alternating rows contain six (the final four cells
+# are blank). The rows are kept separate so each reaction has its own loop.
+SPRITE_ROW_FRAME_COUNTS = (10, 6, 10, 6, 10, 6, 10, 6)
+SPRITE_STATE_ROWS = {
+    "idle": 4,
+    "listening": 6,
+    "thinking": 0,
+    "working": 2,
+    "celebrate": 5,
+    "confused": 7,
+    "talking": 3,
+}
+SPRITE_FPS = {
+    "idle": 8,
+    "listening": 10,
+    "thinking": 7,
+    "working": 12,
+    "celebrate": 14,
+    "confused": 7,
+    "talking": 10,
+}
 
 
 class Bubble(QLabel):
@@ -86,6 +111,8 @@ class PetWindow(QWidget):
 
         self._state = "idle"
         self._t0 = time.monotonic()
+        self._state_started = self._t0
+        self._sprite_frames = self._load_sprite_frames(config.sprite_dir)
         self._press_offset = QPoint()
         self._moved = False
 
@@ -109,11 +136,42 @@ class PetWindow(QWidget):
     def set_state(self, state: str) -> None:
         if state not in STATE_COLORS:
             state = "idle"
+        if state != self._state:
+            self._state_started = time.monotonic()
         self._state = state
         self._reset_timer.stop()
         if state in RESET_AFTER_MS:
             self._reset_timer.start(RESET_AFTER_MS[state])
         self.update()
+
+    @staticmethod
+    def _load_sprite_frames(sprite_dir: str) -> dict[str, list[QImage]]:
+        """Load the configured sprite sheet, falling back to vector drawing if absent."""
+        folder = pathlib.Path(sprite_dir)
+        if not folder.is_absolute():
+            folder = pathlib.Path(__file__).resolve().parent.parent / folder
+        sheet = QImage(str(folder / "sprite_sheet.png"))
+        if sheet.isNull() or sheet.width() % 10 or sheet.height() % 8:
+            return {}
+
+        frame_width = sheet.width() // 10
+        frame_height = sheet.height() // 8
+        rows: dict[int, list[QImage]] = {}
+        for row, frame_count in enumerate(SPRITE_ROW_FRAME_COUNTS):
+            rows[row] = [
+                sheet.copy(QRect(col * frame_width, row * frame_height, frame_width, frame_height))
+                for col in range(frame_count)
+            ]
+        return {state: rows[row] for state, row in SPRITE_STATE_ROWS.items()}
+
+    def _current_sprite_frame(self, now: float | None = None) -> QImage | None:
+        """Return the frame for the active state at a monotonic timestamp."""
+        frames = self._sprite_frames.get(self._state) or self._sprite_frames.get("idle")
+        if not frames:
+            return None
+        elapsed = max(0.0, (time.monotonic() if now is None else now) - self._state_started)
+        frame_index = int(elapsed * SPRITE_FPS.get(self._state, 8)) % len(frames)
+        return frames[frame_index]
 
     def show_bubble(self, text: str) -> None:
         if text:
@@ -155,7 +213,24 @@ class PetWindow(QWidget):
         menu.exec(e.globalPos())
 
     def _ask_text(self) -> None:
-        text, ok = QInputDialog.getText(self, "Desktop Buddy", "Say something:")
+        # A child dialog can be positioned over this small always-on-top window,
+        # leaving its input field hidden. Use a top-level dialog and temporarily
+        # hide the pet so the user can type and submit without obstruction.
+        was_visible = self.isVisible()
+        self._bubble.hide()
+        if was_visible:
+            self.hide()
+        try:
+            text, ok = QInputDialog.getText(
+                None,
+                "Desktop Buddy",
+                "Say something:",
+                flags=Qt.Dialog | Qt.WindowStaysOnTopHint,
+            )
+        finally:
+            if was_visible:
+                self.show()
+                self.raise_()
         if ok and text.strip():
             self.user_text.emit(text.strip())
 
@@ -172,6 +247,25 @@ class PetWindow(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         W, H = self.width(), self.height()
         s = min(W, H) * 0.72
+
+        sprite = self._current_sprite_frame()
+        if sprite is not None:
+            bob = math.sin(t * 2.8) * H * 0.012
+            if st == "celebrate":
+                bob = -abs(math.sin(t * 8.0)) * H * 0.04
+            scale = min(W * 0.72 / sprite.width(), H * 0.9 / sprite.height())
+            draw_width = sprite.width() * scale
+            draw_height = sprite.height() * scale
+            target = QRectF(
+                (W - draw_width) / 2,
+                (H - draw_height) / 2 + bob,
+                draw_width,
+                draw_height,
+            )
+            p.setRenderHint(QPainter.SmoothPixmapTransform, False)
+            p.drawImage(target, sprite)
+            p.end()
+            return
 
         bob = math.sin(t * 2.0) * H * 0.02
         if st == "celebrate":
@@ -215,7 +309,9 @@ class PetWindow(QWidget):
             p.drawEllipse(QRectF(cx - dx - er, ey - er, er * 2, er * 2))
             p.drawEllipse(QRectF(cx + dx - er * 1.6, ey - er * 1.6, er * 3.2, er * 3.2))
             p.drawLine(int(cx - s * 0.1), int(cy + s * 0.16), int(cx + s * 0.1), int(cy + s * 0.11))
-            f = QFont(); f.setBold(True); f.setPixelSize(max(12, int(s * 0.3)))
+            f = QFont()
+            f.setBold(True)
+            f.setPixelSize(max(12, int(s * 0.3)))
             p.setFont(f)
             p.drawText(QRectF(cx - s * 0.1, cy - s * 0.78, s * 0.2, s * 0.3), Qt.AlignCenter, "?")
         else:                      # idle / listening / thinking: round eyes
